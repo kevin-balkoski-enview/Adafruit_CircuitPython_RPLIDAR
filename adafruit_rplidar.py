@@ -44,6 +44,7 @@ Implementation Notes
 Version 0.0.1 does NOT support CircuitPython. Future versions will.
 """
 
+import datetime
 import struct
 import sys
 import time
@@ -52,7 +53,7 @@ import warnings
 # pylint:disable=invalid-name,undefined-variable,global-variable-not-assigned
 # pylint:disable=too-many-arguments,raise-missing-from
 
-__version__ = "0.0.1-auto.0"
+__version__ = "0.0.1-auto.1"
 __repo__ = "https://github.com/adafruit/Adafruit_CircuitPython_RPLIDAR.git"
 
 SYNC_BYTE = b"\xA5"
@@ -328,7 +329,7 @@ class RPLidar:
         self._send_cmd(RESET_BYTE)
         time.sleep(0.002)
 
-    def iter_measurements(self, max_buf_meas=500):
+    def iter_measurements(self, max_buf_meas=500, return_time=False):
         """Iterate over measurements. Note that consumer must be fast enough,
         otherwise data will be accumulated inside buffer and consumer will get
         data with increasing lag.
@@ -338,6 +339,8 @@ class RPLidar:
         max_buf_meas : int
             Maximum number of measurements to be stored inside the buffer. Once
             number exceeds this limit buffer will be emptied out.
+        return_time : bool
+            Whether to include timestamp with measurement.
 
         Yields
 
@@ -350,6 +353,8 @@ class RPLidar:
         distance : float
             Measured object distance related to the sensor's rotation center.
             In millimeter unit. Set to 0 when measurement is invalid.
+        timestamp : datetime.datetime
+            Time of measurement
         """
         self.start_motor()
         status, error_code = self.health
@@ -382,6 +387,7 @@ class RPLidar:
             raise RPLidarException("Wrong response data type")
         while True:
             raw = self._read_response(dsize)
+            timestamp = datetime.datetime.utcnow()
             self.log_bytes("debug", "Received scan response: ", raw)
             if max_buf_meas:
                 data_in_buf = self._serial_port.in_waiting
@@ -392,7 +398,13 @@ class RPLidar:
                         "Clearing buffer..." % (data_in_buf // dsize, max_buf_meas),
                     )
                     self._serial_port.read(data_in_buf // dsize * dsize)
-            yield _process_scan(raw)
+
+            new_scan, quality, angle, distance = _process_scan(raw)
+            if return_time:
+                measurement = (new_scan, quality, angle, distance, timestamp)
+            else:
+                measurement = (new_scan, quality, angle, distance)
+            yield measurement
 
     def iter_measurments(self, max_buf_meas=500):
         """For compatibility, this method wraps `iter_measurements`"""
@@ -403,7 +415,7 @@ class RPLidar:
         )
         self.iter_measurements(max_buf_meas=max_buf_meas)
 
-    def iter_scans(self, max_buf_meas=500, min_len=5):
+    def iter_scans(self, max_buf_meas=500, min_len=5, return_time=False):
         """Iterate over scans. Note that consumer must be fast enough,
         otherwise data will be accumulated inside buffer and consumer will get
         data with increasing lag.
@@ -415,6 +427,8 @@ class RPLidar:
             number exceeds this limit buffer will be emptied out.
         min_len : int
             Minimum number of measurements in the scan for it to be yielded.
+        return_time : bool
+            Whether to include timestamp with measurement.
 
         Yields
 
@@ -424,11 +438,17 @@ class RPLidar:
             refer to `iter_measurements` method's documentation.
         """
         scan = []
-        iterator = self.iter_measurements(max_buf_meas)
-        for new_scan, quality, angle, distance in iterator:
+        iterator = self.iter_measurements(max_buf_meas, return_time=return_time)
+        for measurement in iterator:
+            new_scan, quality, angle, distance = measurement[:4]
             if new_scan:
                 if len(scan) > min_len:
                     yield scan
                 scan = []
             if quality > 0 and distance > 0:
-                scan.append((quality, angle, distance))
+                if return_time:
+                    timestamp = measurement[4]
+                    scan_data = (quality, angle, distance, timestamp)
+                else:
+                    scan_data = (quality, angle, distance)
+                scan.append(scan_data)
